@@ -719,7 +719,7 @@ export class FixGenerator {
     const encoded = Buffer.from(
       `x-access-token:${this.currentGitToken}`
     ).toString("base64");
-    return ["-c", `http.extraheader=Authorization: basic ${encoded}`];
+    return ["-c", `http.https://github.com/.extraheader=Authorization: basic ${encoded}`];
   }
 
   private async execGit(cwd: string, args: string[]): Promise<string> {
@@ -914,6 +914,6 @@ function parseFixDetails(claudeOutput: string): Map<string, string> {
 function sanitizeGitError(message: string): string {
   return message
     .replace(/x-access-token:[^\s@]+/g, "x-access-token:[REDACTED]")
-    .replace(/http\.extraheader=Authorization: basic [A-Za-z0-9+/=]+/g, "http.extraheader=[REDACTED]")
+    .replace(/http\.[^\s]*\.extraheader=Authorization: basic [A-Za-z0-9+/=]+/g, "http.extraheader=[REDACTED]")
     .replace(/Authorization: basic [A-Za-z0-9+/=]+/g, "Authorization: basic [REDACTED]");
 }

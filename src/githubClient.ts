@@ -108,6 +108,9 @@ export class GitHubClient {
   async listAccessibleRepos(): Promise<
     Array<{ owner: string; name: string }>
   > {
+    // Refresh installations so newly added ones are picked up without restart
+    await this.loadInstallations();
+
     const repos: Array<{ owner: string; name: string }> = [];
 
     for await (const { repository } of this.app.eachRepository.iterator()) {
