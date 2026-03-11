@@ -61,7 +61,9 @@ review comments, parses bug reports, and auto-fixes them using Claude Code
   stdin; allowed tools are Read, Edit, and limited Bash (git diff/status only)
 - State: SQLite processed_bugs table with bug_id PRIMARY KEY prevents duplicates
 - Repo cloning: Repos cloned to {workDir}/{owner}/{repo}/; reused with git fetch
-- Git auth for clone/push: Installation access tokens via http.extraheader
+- Git auth for clone/fetch: Installation access tokens via http.extraheader
+- Git push: Uses AUTOFIX_PUSH_TOKEN (classic PAT) if set, otherwise installation
+  token. PAT is needed to trigger webhook events for other integrations.
 
 ## Important Notes
 
@@ -70,5 +72,6 @@ review comments, parses bug reports, and auto-fixes them using Claude Code
 - Fix generator has a 10-minute timeout for claude -p
 - Git operations have a 2-minute timeout
 - Fixes commit directly to the PR head branch (no separate fix branch)
-- No dependency on gh CLI or GH_TOKEN; authentication is via GitHub App only
+- No dependency on gh CLI or GH_TOKEN; authentication is via GitHub App
+- Optional AUTOFIX_PUSH_TOKEN (classic PAT) for git push to trigger webhooks
 - Environment variables use AUTOFIX_ prefix

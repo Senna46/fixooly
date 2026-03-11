@@ -717,7 +717,13 @@ export class FixGenerator {
 
     const sha = (await this.execGit(repoDir, ["rev-parse", "HEAD"])).trim();
 
-    await this.execGit(repoDir, ["push", "origin", branchName]);
+    if (this.config.pushToken) {
+      await this.execGitWithToken(repoDir, this.config.pushToken, [
+        "push", "origin", branchName,
+      ]);
+    } else {
+      await this.execGit(repoDir, ["push", "origin", branchName]);
+    }
 
     return sha;
   }
@@ -728,6 +734,31 @@ export class FixGenerator {
       `x-access-token:${this.currentGitToken}`
     ).toString("base64");
     return ["-c", `http.https://github.com/.extraheader=Authorization: basic ${encoded}`];
+  }
+
+  private async execGitWithToken(
+    cwd: string,
+    token: string,
+    args: string[]
+  ): Promise<string> {
+    const encoded = Buffer.from(`x-access-token:${token}`).toString("base64");
+    const authArgs = [
+      "-c", `http.https://github.com/.extraheader=Authorization: basic ${encoded}`,
+    ];
+    const fullArgs = [...authArgs, ...args];
+    logger.debug(`git ${args.join(" ")} (with push token)`, { cwd });
+    try {
+      const { stdout } = await execFileAsync("git", fullArgs, {
+        cwd,
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 2 * 60 * 1000,
+      });
+      return stdout;
+    } catch (error) {
+      const execError = error as { message?: string; stderr?: string };
+      const sanitized = sanitizeGitError(execError.message ?? "");
+      throw new Error(`git ${args[0]} failed: ${sanitized}`);
+    }
   }
 
   private async execGit(cwd: string, args: string[]): Promise<string> {

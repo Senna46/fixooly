@@ -62,6 +62,9 @@ All config uses the AUTOFIX_ prefix. Required:
 - AUTOFIX_APP_ID (GitHub App ID)
 - AUTOFIX_PRIVATE_KEY_PATH or AUTOFIX_PRIVATE_KEY (GitHub App private key)
 
+Optional:
+- AUTOFIX_PUSH_TOKEN (classic PAT with repo scope, for triggering webhooks on push)
+
 Monitored repositories are auto-discovered from the App installations.
 
 ## Common Tasks

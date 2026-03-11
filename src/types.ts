@@ -11,6 +11,7 @@
 export interface Config {
   appId: number;
   privateKey: string;
+  pushToken: string | null;
   pollInterval: number;
   workDir: string;
   dbPath: string;

@@ -109,10 +109,13 @@ Copy `.env.example` to `.env` and configure:
 | `AUTOFIX_APP_ID` | Yes | GitHub App ID |
 | `AUTOFIX_PRIVATE_KEY_PATH` | Yes\* | Path to the App private key `.pem` file |
 | `AUTOFIX_PRIVATE_KEY` | Yes\* | App private key content (alternative to path) |
+| `AUTOFIX_PUSH_TOKEN` | No | Classic PAT for git push (triggers webhooks) |
 
 \* Either `AUTOFIX_PRIVATE_KEY_PATH` or `AUTOFIX_PRIVATE_KEY` must be set.
 
 Monitored repositories are auto-discovered from the GitHub App installations.
+
+**Why `AUTOFIX_PUSH_TOKEN`?** GitHub does not fire webhook events for pushes made with App installation tokens. If you use integrations that react to push events (e.g. Cursor Bugbot), set a [classic PAT](https://github.com/settings/tokens) with `repo` scope. When set, Fixooly uses this token for `git push` only; all API operations still use the GitHub App.
 
 ### Behavior
 

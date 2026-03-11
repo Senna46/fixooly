@@ -44,12 +44,14 @@ export function loadConfig(): Config {
   const defaultDbPath = join(homedir(), ".fixooly", "state.db");
   const dbPath = process.env.AUTOFIX_DB_PATH?.trim() || defaultDbPath;
 
+  const pushToken = process.env.AUTOFIX_PUSH_TOKEN?.trim() || null;
   const claudeModel = process.env.AUTOFIX_CLAUDE_MODEL?.trim() || null;
   const logLevel = parseLogLevel(process.env.AUTOFIX_LOG_LEVEL);
 
   return {
     appId,
     privateKey,
+    pushToken,
     pollInterval,
     workDir,
     dbPath,
