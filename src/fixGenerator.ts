@@ -1,12 +1,12 @@
-// Fix generation module for Claude Code Bugbot Autofix.
+// Fix generation module for Fixooly.
 // Clones the target repository locally, checks out the PR head branch,
 // runs claude -p with edit and exploration tools to fix detected Cursor Bugbot bugs,
 // then commits and pushes the fix directly to the PR head branch.
+// Uses GitHub App installation tokens for git authentication.
 // Includes project structure, documentation, PR diff, changed file contents,
 // and related file imports as context for accurate, well-integrated fixes.
-// Limitations: Requires git CLI with push access to the target repo.
-//   Claude may not fix all bugs or may introduce new issues.
-//   Only one fix generation runs at a time per PR.
+// Limitations: Requires git CLI. Claude may not fix all bugs or may
+//   introduce new issues. Only one fix generation runs at a time per PR.
 
 import { execFile, spawn } from "child_process";
 import { existsSync } from "fs";
@@ -53,9 +53,17 @@ const execFileAsync = promisify(execFile);
 
 export class FixGenerator {
   private config: Config;
+  private currentGitToken: string | null = null;
+  private botName: string = "fixooly[bot]";
+  private botEmail: string = "fixooly[bot]@users.noreply.github.com";
 
   constructor(config: Config) {
     this.config = config;
+  }
+
+  setBotIdentity(appSlug: string, botUserId: number): void {
+    this.botName = `${appSlug}[bot]`;
+    this.botEmail = `${botUserId}+${appSlug}[bot]@users.noreply.github.com`;
   }
 
   // ============================================================
@@ -64,16 +72,18 @@ export class FixGenerator {
 
   async fixBugsOnPrBranch(
     pr: PullRequest,
-    bugs: BugbotBug[]
+    bugs: BugbotBug[],
+    gitToken?: string
   ): Promise<FixResult | null> {
     if (bugs.length === 0) {
       logger.info("No bugs to fix.");
       return null;
     }
 
-    const repoDir = await this.ensureRepoClone(pr);
+    this.currentGitToken = gitToken ?? null;
 
     try {
+      const repoDir = await this.ensureRepoClone(pr);
       await this.checkoutPrBranch(repoDir, pr);
 
       const prDiff = await this.getPrDiff(repoDir, pr);
@@ -140,9 +150,14 @@ export class FixGenerator {
         repo: pr.repo,
         prNumber: pr.number,
         branch: pr.headRef,
-        error: message,
+        error: sanitizeGitError(message),
       });
+      if (error instanceof Error) {
+        error.message = sanitizeGitError(error.message);
+      }
       throw error;
+    } finally {
+      this.currentGitToken = null;
     }
   }
 
@@ -610,7 +625,7 @@ export class FixGenerator {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
       logger.warn("Failed to retrieve PR diff, continuing without it.", {
-        error: message,
+        error: sanitizeGitError(message),
         baseRef: pr.baseRef,
       });
       return "";
@@ -695,21 +710,65 @@ export class FixGenerator {
       : "fix: Fix Cursor Bugbot issues";
 
     const bugTitles = bugs.map((b) => `- ${b.title}`).join("\n");
-    const commitMessage = `${title}\n\n${bugTitles}\n\nApplied via Claude Code Bugbot Autofix`;
+    const commitMessage = `${title}\n\n${bugTitles}\n\nApplied via Fixooly`;
 
-    await this.execGit(repoDir, ["commit", "-m", commitMessage]);
+    await this.execGit(repoDir, [
+      "-c", `user.name=${this.botName}`,
+      "-c", `user.email=${this.botEmail}`,
+      "commit", "-m", commitMessage,
+    ]);
 
     const sha = (await this.execGit(repoDir, ["rev-parse", "HEAD"])).trim();
 
-    await this.execGit(repoDir, ["push", "origin", branchName]);
+    if (this.config.pushToken) {
+      await this.execGitWithToken(repoDir, this.config.pushToken, [
+        "push", "origin", branchName,
+      ]);
+    } else {
+      await this.execGit(repoDir, ["push", "origin", branchName]);
+    }
 
     return sha;
   }
 
+  private buildGitAuthArgs(): string[] {
+    if (!this.currentGitToken) return [];
+    const encoded = Buffer.from(
+      `x-access-token:${this.currentGitToken}`
+    ).toString("base64");
+    return ["-c", `http.https://github.com/.extraheader=Authorization: basic ${encoded}`];
+  }
+
+  private async execGitWithToken(
+    cwd: string,
+    token: string,
+    args: string[]
+  ): Promise<string> {
+    const encoded = Buffer.from(`x-access-token:${token}`).toString("base64");
+    const authArgs = [
+      "-c", `http.https://github.com/.extraheader=Authorization: basic ${encoded}`,
+    ];
+    const fullArgs = [...authArgs, ...args];
+    logger.debug(`git ${args.join(" ")} (with push token)`, { cwd });
+    try {
+      const { stdout } = await execFileAsync("git", fullArgs, {
+        cwd,
+        maxBuffer: 10 * 1024 * 1024,
+        timeout: 2 * 60 * 1000,
+      });
+      return stdout;
+    } catch (error) {
+      const execError = error as { message?: string; stderr?: string };
+      const sanitized = sanitizeGitError(execError.message ?? "");
+      throw new Error(`git ${args[0]} failed: ${sanitized}`);
+    }
+  }
+
   private async execGit(cwd: string, args: string[]): Promise<string> {
     logger.debug(`git ${args.join(" ")}`, { cwd });
+    const fullArgs = [...this.buildGitAuthArgs(), ...args];
     try {
-      const { stdout } = await execFileAsync("git", args, {
+      const { stdout } = await execFileAsync("git", fullArgs, {
         cwd,
         maxBuffer: 10 * 1024 * 1024,
         timeout: 2 * 60 * 1000,
@@ -720,9 +779,18 @@ export class FixGenerator {
       logger.error(`git ${args.join(" ")} failed.`, {
         cwd,
         exitCode: execError.code,
-        stderr: execError.stderr?.trim() || "(empty)",
-        stdout: execError.stdout?.trim() || "(empty)",
+        stderr: sanitizeGitError(execError.stderr?.trim() || "(empty)"),
+        stdout: sanitizeGitError(execError.stdout?.trim() || "(empty)"),
       });
+      if (execError.stderr) {
+        execError.stderr = sanitizeGitError(execError.stderr);
+      }
+      if (execError.stdout) {
+        execError.stdout = sanitizeGitError(execError.stdout);
+      }
+      if (execError.message) {
+        execError.message = sanitizeGitError(execError.message);
+      }
       throw error;
     }
   }
@@ -888,4 +956,15 @@ function parseFixDetails(claudeOutput: string): Map<string, string> {
   }
 
   return details;
+}
+
+// ============================================================
+// Utility: strip leaked tokens from git error messages
+// ============================================================
+
+function sanitizeGitError(message: string): string {
+  return message
+    .replace(/x-access-token:[^\s@]+/g, "x-access-token:[REDACTED]")
+    .replace(/http\.[^\s]*\.extraheader=Authorization: basic [A-Za-z0-9+/=]+/g, "http.extraheader=[REDACTED]")
+    .replace(/Authorization: basic [A-Za-z0-9+/=]+/g, "Authorization: basic [REDACTED]");
 }
