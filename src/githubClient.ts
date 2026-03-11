@@ -25,13 +25,25 @@ export interface ReviewComment {
 
 export class GitHubClient {
   private app: App;
+  private _appSlug: string;
+  private _botUserId: number;
   private installationMap: Map<string, number>;
   private octokitCache: Map<number, Octokit>;
 
-  private constructor(app: App) {
+  private constructor(app: App, appSlug: string, botUserId: number) {
     this.app = app;
+    this._appSlug = appSlug;
+    this._botUserId = botUserId;
     this.installationMap = new Map();
     this.octokitCache = new Map();
+  }
+
+  get appSlug(): string {
+    return this._appSlug;
+  }
+
+  get botUserId(): number {
+    return this._botUserId;
   }
 
   // ============================================================
@@ -43,9 +55,51 @@ export class GitHubClient {
     privateKey: string
   ): Promise<GitHubClient> {
     const app = new App({ appId, privateKey });
-    const client = new GitHubClient(app);
+
+    const client = new GitHubClient(app, `app-${appId}`, 0);
     await client.loadInstallations();
+    await client.resolveBotIdentity();
     return client;
+  }
+
+  private async resolveBotIdentity(): Promise<void> {
+    const firstInstallationId = this.installationMap.values().next().value;
+    if (firstInstallationId === undefined) return;
+
+    const octokit = await this.getInstallationOctokit(firstInstallationId);
+
+    try {
+      const { data: appInfo } = await octokit.rest.apps.getAuthenticated();
+      this._appSlug = appInfo?.slug ?? this._appSlug;
+    } catch (error) {
+      logger.warn("Failed to fetch app slug, using fallback.", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    try {
+      const { data: botUser } = await octokit.rest.users.getByUsername({
+        username: `${this._appSlug}[bot]`,
+      });
+      this._botUserId = botUser.id;
+    } catch (error) {
+      logger.warn("Failed to fetch bot user ID, commits may not show app avatar.", {
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+
+    logger.info("Bot identity resolved.", {
+      appSlug: this._appSlug,
+      botUserId: this._botUserId,
+    });
+  }
+
+  private async getInstallationOctokit(installationId: number): Promise<Octokit> {
+    const cached = this.octokitCache.get(installationId);
+    if (cached) return cached;
+    const octokit = await this.app.getInstallationOctokit(installationId);
+    this.octokitCache.set(installationId, octokit as Octokit);
+    return octokit as Octokit;
   }
 
   // ============================================================
@@ -90,15 +144,7 @@ export class GitHubClient {
 
   private async getOctokitForOwner(owner: string): Promise<Octokit> {
     const installationId = this.getInstallationId(owner);
-
-    const cached = this.octokitCache.get(installationId);
-    if (cached) {
-      return cached;
-    }
-
-    const octokit = await this.app.getInstallationOctokit(installationId);
-    this.octokitCache.set(installationId, octokit as Octokit);
-    return octokit as Octokit;
+    return this.getInstallationOctokit(installationId);
   }
 
   // ============================================================

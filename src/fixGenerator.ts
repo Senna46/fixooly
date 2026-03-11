@@ -54,9 +54,16 @@ const execFileAsync = promisify(execFile);
 export class FixGenerator {
   private config: Config;
   private currentGitToken: string | null = null;
+  private botName: string = "fixooly[bot]";
+  private botEmail: string = "fixooly[bot]@users.noreply.github.com";
 
   constructor(config: Config) {
     this.config = config;
+  }
+
+  setBotIdentity(appSlug: string, botUserId: number): void {
+    this.botName = `${appSlug}[bot]`;
+    this.botEmail = `${botUserId}+${appSlug}[bot]@users.noreply.github.com`;
   }
 
   // ============================================================
@@ -705,13 +712,9 @@ export class FixGenerator {
     const bugTitles = bugs.map((b) => `- ${b.title}`).join("\n");
     const commitMessage = `${title}\n\n${bugTitles}\n\nApplied via Fixooly`;
 
-    const appSlug = "senna-fixooly";
-    const botName = `${appSlug}[bot]`;
-    const botEmail = `${this.config.appId}+${appSlug}[bot]@users.noreply.github.com`;
-
     await this.execGit(repoDir, [
-      "-c", `user.name=${botName}`,
-      "-c", `user.email=${botEmail}`,
+      "-c", `user.name=${this.botName}`,
+      "-c", `user.email=${this.botEmail}`,
       "commit", "-m", commitMessage,
     ]);
 

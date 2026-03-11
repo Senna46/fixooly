@@ -52,6 +52,10 @@ class FixoolyDaemon {
       this.config.appId,
       this.config.privateKey
     );
+    this.fixGenerator.setBotIdentity(
+      this.github.appSlug,
+      this.github.botUserId
+    );
     this.monitor = new BugbotMonitor(this.github, this.state, this.config);
 
     logger.info("Initialization complete. Starting daemon loop.");
