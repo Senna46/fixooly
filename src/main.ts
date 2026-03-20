@@ -217,11 +217,11 @@ class FixoolyDaemon {
             repo: repoFullName,
             prNumber: pr.number,
           })),
-          null
+          "SKIPPED_NO_CHANGES"
         );
 
         logger.info(
-          `No changes made for PR #${pr.number}. Bugs recorded as processed.`,
+          `No changes made for PR #${pr.number}. Bugs recorded as skipped.`,
           { prNumber: pr.number, repo: repoFullName }
         );
       }
