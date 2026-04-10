@@ -702,7 +702,7 @@ export class FixGenerator {
     await this.execGit(repoDir, ["add", "-A"]);
 
     const title = commitSummary
-      ? stripConventionalCommitPrefix(commitSummary)
+      ? commitSummary
       : bugs.length === 1
       ? bugs[0].title
       : "Fix Cursor Bugbot issues";
@@ -838,17 +838,6 @@ function extractImportPaths(source: string): string[] {
   }
 
   return paths;
-}
-
-// ============================================================
-// Utility: strip conventional commit prefix from a message
-// ============================================================
-
-const CONVENTIONAL_COMMIT_REGEX =
-  /^(fix|feat|chore|refactor|perf|test|docs|style|build|ci|revert)(\(.+?\))?!?:\s/i;
-
-function stripConventionalCommitPrefix(message: string): string {
-  return message.replace(CONVENTIONAL_COMMIT_REGEX, "");
 }
 
 // ============================================================
