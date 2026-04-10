@@ -702,12 +702,10 @@ export class FixGenerator {
     await this.execGit(repoDir, ["add", "-A"]);
 
     const title = commitSummary
-      ? hasConventionalCommitPrefix(commitSummary)
-        ? commitSummary
-        : `fix: ${commitSummary}`
+      ? stripConventionalCommitPrefix(commitSummary)
       : bugs.length === 1
-      ? `fix: ${bugs[0].title}`
-      : "fix: Fix Cursor Bugbot issues";
+      ? bugs[0].title
+      : "Fix Cursor Bugbot issues";
 
     const bugTitles = bugs.map((b) => `- ${b.title}`).join("\n");
     const commitMessage = `${title}\n\n${bugTitles}\n\nApplied via Fixooly`;
@@ -847,10 +845,10 @@ function extractImportPaths(source: string): string[] {
 // ============================================================
 
 const CONVENTIONAL_COMMIT_REGEX =
-  /^(fix|feat|chore|refactor|perf|test|docs|style|build|ci|revert)(\(.+?\))?!?:\s/i;
+  /^(fix|feat|chore|refactor|perf|test|docs|style|build|ci|revert)(\(.+?\))?!?:\s+/i;
 
-function hasConventionalCommitPrefix(message: string): boolean {
-  return CONVENTIONAL_COMMIT_REGEX.test(message);
+function stripConventionalCommitPrefix(message: string): string {
+  return message.replace(CONVENTIONAL_COMMIT_REGEX, "").trim() || message;
 }
 
 // ============================================================
