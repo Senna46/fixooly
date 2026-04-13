@@ -199,6 +199,11 @@ export class FixGenerator {
     repoDir: string,
     pr: PullRequest
   ): Promise<void> {
+    // Discard any leftover changes from a previous run (e.g. crash after
+    // claude -p edited files but before commit/push completed).
+    await this.execGit(repoDir, ["reset", "--hard", "HEAD"]);
+    await this.execGit(repoDir, ["clean", "-fd"]);
+
     await this.execGit(repoDir, ["fetch", "--all", "--prune"]);
     await this.execGit(repoDir, ["checkout", `origin/${pr.headRef}`]);
 
