@@ -103,6 +103,24 @@ function extractMessageFromJson(value: unknown): string | null {
     return obj.message;
   }
 
+  // Codex JSONL (current `codex exec --json`): the final reply arrives on an
+  // item.completed event whose nested item is an agent_message carrying the
+  // text. Example:
+  //   { "type": "item.completed",
+  //     "item": { "type": "agent_message", "text": "..." } }
+  // turn.completed events are usually usage-only and carry no reply text.
+  const item = obj.item;
+  if (item && typeof item === "object") {
+    const itemObj = item as Record<string, unknown>;
+    if (
+      itemObj.type === "agent_message" &&
+      typeof itemObj.text === "string" &&
+      itemObj.text.length > 0
+    ) {
+      return itemObj.text;
+    }
+  }
+
   // Cursor stream-json: assistant turn with content blocks
   // { "type": "assistant", "message": { "content": [{ "text": "..." }] } }
   const message = obj.message;
