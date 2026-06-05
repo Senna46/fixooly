@@ -1,17 +1,20 @@
 // Main entry point for Fixooly daemon.
 // Orchestrates the polling loop: discovers Cursor Bugbot reports
-// on open PRs, generates fixes using Claude Code, and commits
-// the fixes directly to the PR head branch.
-// Uses GitHub App authentication; monitored repositories are auto-discovered
-// from App installations.
-// Limitations: Single-threaded; processes PRs sequentially
-//   within each polling cycle. Graceful shutdown on SIGINT/SIGTERM.
+// on open PRs, generates fixes using the configured BugFixer backend
+// (Claude / Codex / Cursor CLI), and commits the fixes directly to the
+// PR head branch.
+// Uses GitHub App authentication; monitored repositories are
+// auto-discovered from App installations.
+// Limitations: Single-threaded; processes PRs sequentially within each
+//   polling cycle. Graceful shutdown on SIGINT/SIGTERM.
 
 import { mkdirSync, openSync, closeSync, unlinkSync, writeFileSync, readFileSync } from "fs";
 import { dirname, join } from "path";
 
 import { BugbotMonitor } from "./bugbotMonitor.js";
 import { loadConfig } from "./config.js";
+import { createFixer } from "./fixers/factory.js";
+import type { BugFixer } from "./fixers/types.js";
 import { FixGenerator } from "./fixGenerator.js";
 import { GitHubClient } from "./githubClient.js";
 import { logger, setLogLevel } from "./logger.js";
@@ -26,13 +29,15 @@ class FixoolyDaemon {
   private state: StateStore;
   private github!: GitHubClient;
   private monitor!: BugbotMonitor;
+  private fixer: BugFixer;
   private fixGenerator: FixGenerator;
   private isShuttingDown = false;
 
   constructor(config: Config) {
     this.config = config;
     this.state = new StateStore(config.dbPath);
-    this.fixGenerator = new FixGenerator(config);
+    this.fixer = createFixer(config);
+    this.fixGenerator = new FixGenerator(config, this.fixer);
   }
 
   // ============================================================
@@ -44,7 +49,8 @@ class FixoolyDaemon {
     logger.info("Configuration loaded.", {
       appId: this.config.appId,
       pollInterval: this.config.pollInterval,
-      claudeModel: this.config.claudeModel ?? "(default)",
+      fixer: this.fixer.name,
+      model: this.selectedModel() ?? "(default)",
     });
 
     await this.verifyPrerequisites();
@@ -60,6 +66,21 @@ class FixoolyDaemon {
     this.monitor = new BugbotMonitor(this.github, this.state, this.config);
 
     logger.info("Initialization complete. Starting daemon loop.");
+  }
+
+  // Resolve the model override that applies to the currently selected
+  // fixer, used only for the human-friendly startup log line.
+  private selectedModel(): string | null {
+    switch (this.fixer.name) {
+      case "claude":
+        return this.config.claudeModel;
+      case "codex":
+        return this.config.codexModel;
+      case "cursor":
+        return this.config.cursorModel;
+      default:
+        return null;
+    }
   }
 
   // ============================================================
@@ -82,30 +103,10 @@ class FixoolyDaemon {
       appId: this.config.appId,
     });
 
-    try {
-      const { stdout } = await execFileAsync("claude", ["--version"]);
-      logger.debug("claude CLI version.", { version: stdout.trim() });
-    } catch {
-      throw new Error(
-        "claude CLI is not available. Install Claude Code first: https://docs.anthropic.com/en/docs/claude-code"
-      );
-    }
-
-    if (
-      !process.env.CLAUDE_CODE_OAUTH_TOKEN &&
-      !process.env.ANTHROPIC_API_KEY
-    ) {
-      const { existsSync } = await import("fs");
-      const homeDir = process.env.HOME ?? "/root";
-      const credFile = `${homeDir}/.claude/.credentials.json`;
-      if (!existsSync(credFile)) {
-        logger.warn(
-          "No Claude authentication detected. " +
-          "On macOS Docker, set CLAUDE_CODE_OAUTH_TOKEN (run 'claude setup-token' to generate). " +
-          "On Linux, ensure ~/.claude is mounted and contains .credentials.json."
-        );
-      }
-    }
+    // Backend-specific CLI / credential checks. Each BugFixer is
+    // responsible for verifying that its own binary is reachable and
+    // that authentication is set up.
+    await this.fixer.verifyPrerequisites();
 
     try {
       await execFileAsync("git", ["--version"]);

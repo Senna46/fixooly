@@ -5,8 +5,10 @@ Guidelines for AI agents working on this codebase.
 ## Repository Purpose
 
 This is **Fixooly**, a daemon that automatically fixes bugs reported by
-Cursor Bugbot on GitHub PRs using Claude Code. It does NOT detect bugs itself;
-it only reads Cursor Bugbot review comments and generates fixes.
+Cursor Bugbot on GitHub PRs by delegating to a pluggable BugFixer backend
+(Cursor CLI / Codex CLI / Claude Code CLI), selected via the AUTOFIX_FIXER
+environment variable. It does NOT detect bugs itself; it only reads
+Cursor Bugbot review comments and generates fixes.
 
 ## Before Making Changes
 
@@ -37,15 +39,25 @@ it only reads Cursor Bugbot review comments and generates fixes.
            -> bugParser.ts
            -> githubClient.ts
            -> state.ts
+      -> fixers/factory.ts
+           -> fixers/claudeFixer.ts
+           -> fixers/codexFixer.ts
+           -> fixers/cursorFixer.ts
+                (all use fixers/spawnRunner.ts)
       -> fixGenerator.ts
+           -> fixers/types.ts (BugFixer)
+           -> fixers/outputParser.ts
       -> types.ts (shared by all)
 
 ## Key Interfaces
 
-- Config: All AUTOFIX_* settings from environment (appId, privateKey, etc.)
+- Config: All AUTOFIX_* settings from environment (appId, privateKey, fixer, ...)
+- FixerKind: "claude" | "codex" | "cursor" (the supported backends)
+- BugFixer: Common interface every fixer implements (name, verifyPrerequisites, generateFix)
+- FixerInput: Per-invocation input passed to a BugFixer (cwd, prompt, timeoutMs, bugCount)
 - BugbotBug: Parsed bug report from Cursor Bugbot comment
 - PrBugReport: A PR with its list of unprocessed bugs
-- FixResult: Commit SHA and list of fixed bugs after claude -p
+- FixResult: Commit SHA and list of fixed bugs after the fixer ran
 - PullRequest: GitHub PR metadata (owner, repo, number, headRef, etc.)
 - ReviewComment: Raw review comment data from GitHub API
 
@@ -58,11 +70,17 @@ After any code change:
 
 ## Environment Variables
 
-All config uses the AUTOFIX_ prefix. Required:
+All Fixooly-specific config uses the AUTOFIX_ prefix. Required:
 - AUTOFIX_APP_ID (GitHub App ID)
 - AUTOFIX_PRIVATE_KEY_PATH or AUTOFIX_PRIVATE_KEY (GitHub App private key)
+- AUTOFIX_FIXER (`claude` | `codex` | `cursor`; no default)
 
-Optional:
+Backend-specific (depending on AUTOFIX_FIXER):
+- cursor: CURSOR_API_KEY, optional AUTOFIX_CURSOR_MODEL
+- codex:  CODEX_API_KEY (or ~/.codex/auth.json), optional AUTOFIX_CODEX_MODEL
+- claude: CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY, optional AUTOFIX_CLAUDE_MODEL
+
+Optional general:
 - AUTOFIX_PUSH_TOKEN (classic PAT with repo scope, for triggering webhooks on push)
 
 Monitored repositories are auto-discovered from the App installations.
@@ -81,6 +99,15 @@ Monitored repositories are auto-discovered from the App installations.
   <!-- LOCATIONS START/END -->
 
 ### Changing fix generation behavior
-- Edit fixGenerator.ts, specifically runClaudeFix() for the prompt
-  and commitAndPush() for commit message format
-- The claude -p allowed tools are: Read, Edit, Bash(git diff *), Bash(git status *)
+- Edit fixGenerator.ts for the prompt construction in buildFixPrompt(),
+  and commitAndPush() for the commit message format
+- Per-backend CLI invocation lives in src/fixers/*Fixer.ts; tool
+  restrictions and authentication checks belong there, not in fixGenerator.ts
+- Shared output marker conventions (COMMIT_MSG:, FIX_DETAIL:) and parsing
+  live in src/fixers/outputParser.ts
+
+### Adding a new fixer backend
+1. Add the new value to FixerKind in types.ts and VALID_FIXER_KINDS in config.ts
+2. Create src/fixers/<name>Fixer.ts implementing the BugFixer interface
+3. Wire it into createFixer() in src/fixers/factory.ts
+4. Document env vars and authentication in .env.example and README.md
