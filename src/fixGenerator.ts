@@ -1,20 +1,31 @@
 // Fix generation module for Fixooly.
 // Clones the target repository locally, checks out the PR head branch,
-// runs claude -p with edit and exploration tools to fix detected Cursor Bugbot bugs,
-// then commits and pushes the fix directly to the PR head branch.
-// Uses GitHub App installation tokens for git authentication.
-// Includes project structure, documentation, PR diff, changed file contents,
-// and related file imports as context for accurate, well-integrated fixes.
-// Limitations: Requires git CLI. Claude may not fix all bugs or may
-//   introduce new issues. Only one fix generation runs at a time per PR.
+// dispatches to the configured BugFixer (Claude / Codex / Cursor CLI) to
+// edit files in place, then commits and pushes the fix directly to the
+// PR head branch. Uses GitHub App installation tokens for git
+// authentication.
+// Includes project structure, documentation, PR diff, changed file
+// contents, and related file imports as context for accurate,
+// well-integrated fixes. The fixer-specific CLI invocation lives in
+// src/fixers/*; this module is concerned with cloning, prompt assembly,
+// and committing the result.
+// Limitations: Requires git CLI. The underlying fixer may not resolve
+//   every bug or may introduce new issues. Only one fix generation runs
+//   at a time per PR.
 
-import { execFile, spawn } from "child_process";
+import { execFile } from "child_process";
 import { existsSync } from "fs";
-import { readFile } from "fs/promises";
-import { mkdir } from "fs/promises";
+import { readFile, mkdir } from "fs/promises";
 import { dirname, join, resolve as pathResolve } from "path";
 import { promisify } from "util";
 
+import {
+  COMMIT_MSG_PREFIX,
+  FIX_DETAIL_PREFIX,
+  parseCommitMessage,
+  parseFixDetails,
+} from "./fixers/outputParser.js";
+import type { BugFixer } from "./fixers/types.js";
 import { logger } from "./logger.js";
 import type { BugbotBug, Config, FixResult, PullRequest } from "./types.js";
 
@@ -26,39 +37,22 @@ const MAX_DOC_SIZE = 10_000;
 
 const PROJECT_DOC_FILES = ["CLAUDE.md", "AGENTS.md", "README.md"];
 
-const ALLOWED_TOOLS = [
-  "Read",
-  "Edit",
-  "Bash(git diff *)",
-  "Bash(git status *)",
-  "Bash(find *)",
-  "Bash(grep *)",
-  "Bash(rg *)",
-  "Bash(ls *)",
-  "Bash(cat *)",
-  "Bash(head *)",
-  "Bash(tail *)",
-  "Bash(wc *)",
-  "Bash(tree *)",
-].join(",");
-
-const COMMIT_MSG_PREFIX = "COMMIT_MSG: ";
-const FIX_DETAIL_PREFIX = "FIX_DETAIL: ";
-
-const CLAUDE_TIMEOUT_MS = 10 * 60 * 1000;
-const SIGKILL_GRACE_MS = 5_000;
-const MAX_STDOUT_SIZE = 100_000;
+// Wall-clock budget for a single fix generation. Applies uniformly to
+// every BugFixer backend; the runner in spawnRunner.ts enforces it.
+const FIXER_TIMEOUT_MS = 10 * 60 * 1000;
 
 const execFileAsync = promisify(execFile);
 
 export class FixGenerator {
   private config: Config;
+  private fixer: BugFixer;
   private currentGitToken: string | null = null;
   private botName: string = "fixooly[bot]";
   private botEmail: string = "fixooly[bot]@users.noreply.github.com";
 
-  constructor(config: Config) {
+  constructor(config: Config, fixer: BugFixer) {
     this.config = config;
+    this.fixer = fixer;
   }
 
   setBotIdentity(appSlug: string, botUserId: number): void {
@@ -108,19 +102,23 @@ export class FixGenerator {
         relatedFileContents
       );
 
-      const claudeOutput = await this.runClaudeFix(
-        repoDir,
+      const fixerOutput = await this.fixer.generateFix({
+        cwd: repoDir,
         prompt,
-        bugs.length
-      );
+        timeoutMs: FIXER_TIMEOUT_MS,
+        bugCount: bugs.length,
+      });
 
       const hasChanges = await this.hasUncommittedChanges(repoDir);
       if (!hasChanges) {
-        logger.info("Claude did not make any changes. No fix to commit.");
+        logger.info(
+          `${this.fixer.name} fixer did not make any changes. ` +
+            "No fix to commit."
+        );
         return null;
       }
 
-      const commitSummary = parseCommitMessage(claudeOutput);
+      const commitSummary = parseCommitMessage(fixerOutput);
       const commitSha = await this.commitAndPush(
         repoDir,
         pr.headRef,
@@ -128,7 +126,7 @@ export class FixGenerator {
         commitSummary
       );
 
-      const fixDetails = parseFixDetails(claudeOutput);
+      const fixDetails = parseFixDetails(fixerOutput);
       const fixedBugs = bugs.map((bug) => ({
         bugId: bug.bugId,
         title: bug.title,
@@ -200,7 +198,7 @@ export class FixGenerator {
     pr: PullRequest
   ): Promise<void> {
     // Discard any leftover changes from a previous run (e.g. crash after
-    // claude -p edited files but before commit/push completed).
+    // the fixer edited files but before commit/push completed).
     await this.execGit(repoDir, ["reset", "--hard", "HEAD"]);
     await this.execGit(repoDir, ["clean", "-fd"]);
 
@@ -304,106 +302,6 @@ export class FixGenerator {
     );
 
     return sections.join("\n\n");
-  }
-
-  // ============================================================
-  // Run claude -p for fixing bugs
-  // ============================================================
-
-  private async runClaudeFix(
-    repoDir: string,
-    prompt: string,
-    bugCount: number
-  ): Promise<string> {
-    const args = ["-p", "--allowedTools", ALLOWED_TOOLS];
-
-    if (this.config.claudeModel) {
-      args.push("--model", this.config.claudeModel);
-    }
-
-    logger.info("Running claude -p for fix generation...", {
-      bugCount,
-      repoDir,
-    });
-
-    return new Promise<string>((resolve, reject) => {
-      let settled = false;
-
-      const child = spawn("claude", args, {
-        cwd: repoDir,
-        stdio: ["pipe", "pipe", "pipe"],
-      });
-
-      let stdout = "";
-      let stderr = "";
-
-      const killTimer = setTimeout(() => {
-        if (settled) return;
-        logger.warn("claude -p timed out, sending SIGTERM.", {
-          timeoutMs: CLAUDE_TIMEOUT_MS,
-        });
-        child.kill("SIGTERM");
-        setTimeout(() => {
-          if (settled) return;
-          logger.warn("claude -p did not exit after SIGTERM, sending SIGKILL.");
-          child.kill("SIGKILL");
-        }, SIGKILL_GRACE_MS);
-      }, CLAUDE_TIMEOUT_MS);
-
-      child.stdout.on("data", (data: Buffer) => {
-        stdout += data.toString();
-        if (stdout.length > MAX_STDOUT_SIZE) {
-          stdout = stdout.substring(stdout.length - MAX_STDOUT_SIZE);
-        }
-      });
-
-      child.stderr.on("data", (data: Buffer) => {
-        stderr += data.toString();
-      });
-
-      child.on("close", (code, signal) => {
-        clearTimeout(killTimer);
-        if (settled) return;
-        settled = true;
-
-        if (signal === "SIGTERM" || signal === "SIGKILL") {
-          logger.error("claude -p timed out.", {
-            signal,
-            timeoutMs: CLAUDE_TIMEOUT_MS,
-            stderr: stderr.substring(0, 1000) || "(empty)",
-            stdoutTail: stdout.substring(Math.max(0, stdout.length - 1000)) || "(empty)",
-          });
-          reject(
-            new Error(
-              `claude -p fix generation timed out after ${CLAUDE_TIMEOUT_MS / 1000}s.`
-            )
-          );
-          return;
-        }
-        if (code !== 0) {
-          logger.error("claude -p exited with non-zero code.", {
-            exitCode: code,
-            stderr: stderr.substring(0, 1000) || "(empty)",
-            stdoutTail: stdout.substring(Math.max(0, stdout.length - 2000)) || "(empty)",
-          });
-          reject(
-            new Error(`claude -p fix generation exited with code ${code}.`)
-          );
-          return;
-        }
-        resolve(stdout);
-      });
-
-      child.on("error", (error) => {
-        clearTimeout(killTimer);
-        if (settled) return;
-        settled = true;
-        reject(new Error(`claude -p fix generation failed: ${error.message}`));
-      });
-
-      child.stdin.write(prompt);
-      child.stdin.end();
-    });
   }
 
   // ============================================================
@@ -864,90 +762,6 @@ function safeResolvePath(baseDir: string, relativePath: string): string | null {
     return null;
   }
   return resolved;
-}
-
-// ============================================================
-// Utility: extract searchable text from claude -p output
-// ============================================================
-
-function extractSearchableText(claudeOutput: string): string {
-  const trimmed = claudeOutput.trim();
-  if (trimmed.startsWith("{") || trimmed.startsWith("[")) {
-    try {
-      const parsed = JSON.parse(trimmed);
-      if (typeof parsed.result === "string") {
-        return parsed.result;
-      }
-    } catch {
-      // fall through to JSONL line scanning
-    }
-  }
-
-  // Try JSONL: find the last line with a result field.
-  // This also handles truncated output where the leading { or [ was stripped,
-  // since individual JSONL lines near the end remain intact.
-  const jsonLines = trimmed.split("\n");
-  for (let i = jsonLines.length - 1; i >= 0; i--) {
-    const line = jsonLines[i].trim();
-    if (!line.startsWith("{")) continue;
-    try {
-      const parsed = JSON.parse(line);
-      if (typeof parsed.result === "string") {
-        return parsed.result;
-      }
-    } catch {
-      continue;
-    }
-  }
-
-  return claudeOutput;
-}
-
-// ============================================================
-// Utility: parse COMMIT_MSG from claude -p output
-// ============================================================
-
-function parseCommitMessage(claudeOutput: string): string | null {
-  const textToSearch = extractSearchableText(claudeOutput);
-
-  const lines = textToSearch.split("\n");
-  for (let i = lines.length - 1; i >= 0; i--) {
-    const line = lines[i].trim();
-    if (line.startsWith(COMMIT_MSG_PREFIX)) {
-      const message = line.substring(COMMIT_MSG_PREFIX.length).trim();
-      if (message.length > 0) {
-        return message;
-      }
-    }
-  }
-
-  return null;
-}
-
-// ============================================================
-// Utility: parse per-bug FIX_DETAIL lines from claude -p output
-// ============================================================
-
-function parseFixDetails(claudeOutput: string): Map<string, string> {
-  const details = new Map<string, string>();
-  const textToSearch = extractSearchableText(claudeOutput);
-
-  for (const line of textToSearch.split("\n")) {
-    const trimmed = line.trim();
-    if (trimmed.startsWith(FIX_DETAIL_PREFIX)) {
-      const content = trimmed.substring(FIX_DETAIL_PREFIX.length).trim();
-      const separatorIndex = content.indexOf("|");
-      if (separatorIndex > 0) {
-        const bugId = content.substring(0, separatorIndex).trim();
-        const fixDescription = content.substring(separatorIndex + 1).trim();
-        if (bugId && fixDescription) {
-          details.set(bugId, fixDescription);
-        }
-      }
-    }
-  }
-
-  return details;
 }
 
 // ============================================================

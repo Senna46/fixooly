@@ -8,6 +8,11 @@
 // Configuration
 // ============================================================
 
+// Selects which bug-fix backend the daemon dispatches to. The actual
+// CLI invocation, authentication, and prompt-shape conventions live in
+// the corresponding BugFixer implementation under src/fixers/.
+export type FixerKind = "claude" | "codex" | "cursor";
+
 export interface Config {
   appId: number;
   privateKey: string;
@@ -15,7 +20,10 @@ export interface Config {
   pollInterval: number;
   workDir: string;
   dbPath: string;
+  fixer: FixerKind;
   claudeModel: string | null;
+  codexModel: string | null;
+  cursorModel: string | null;
   logLevel: LogLevel;
 }
 

@@ -11,9 +11,10 @@ import { config as dotenvConfig } from "dotenv";
 import { homedir } from "os";
 import { join } from "path";
 
-import type { Config, LogLevel } from "./types.js";
+import type { Config, FixerKind, LogLevel } from "./types.js";
 
 const VALID_LOG_LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
+const VALID_FIXER_KINDS: FixerKind[] = ["claude", "codex", "cursor"];
 
 export function loadConfig(): Config {
   dotenvConfig();
@@ -45,7 +46,10 @@ export function loadConfig(): Config {
   const dbPath = process.env.AUTOFIX_DB_PATH?.trim() || defaultDbPath;
 
   const pushToken = process.env.AUTOFIX_PUSH_TOKEN?.trim() || null;
+  const fixer = parseFixerKind(process.env.AUTOFIX_FIXER);
   const claudeModel = process.env.AUTOFIX_CLAUDE_MODEL?.trim() || null;
+  const codexModel = process.env.AUTOFIX_CODEX_MODEL?.trim() || null;
+  const cursorModel = process.env.AUTOFIX_CURSOR_MODEL?.trim() || null;
   const logLevel = parseLogLevel(process.env.AUTOFIX_LOG_LEVEL);
 
   return {
@@ -55,7 +59,10 @@ export function loadConfig(): Config {
     pollInterval,
     workDir,
     dbPath,
+    fixer,
     claudeModel,
+    codexModel,
+    cursorModel,
     logLevel,
   };
 }
@@ -108,4 +115,24 @@ function parseLogLevel(value: string | undefined): LogLevel {
     );
   }
   return level;
+}
+
+// AUTOFIX_FIXER is mandatory and intentionally has no default. Operators
+// must opt into a backend explicitly so they understand which CLI and
+// subscription is being charged.
+function parseFixerKind(value: string | undefined): FixerKind {
+  const raw = value?.trim().toLowerCase();
+  if (!raw) {
+    throw new Error(
+      "Configuration error: AUTOFIX_FIXER is required. " +
+        `Set it to one of: ${VALID_FIXER_KINDS.join(", ")}.`
+    );
+  }
+  if (!VALID_FIXER_KINDS.includes(raw as FixerKind)) {
+    throw new Error(
+      `Configuration error: Invalid AUTOFIX_FIXER value "${value}". ` +
+        `Valid values: ${VALID_FIXER_KINDS.join(", ")}.`
+    );
+  }
+  return raw as FixerKind;
 }
