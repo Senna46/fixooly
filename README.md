@@ -1,15 +1,19 @@
 # Fixooly
 
-Automatically fix [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot)-reported bugs using [Claude Code](https://docs.anthropic.com/en/docs/claude-code).
+Automatically fix [Cursor Bugbot](https://cursor.com/dashboard?tab=bugbot)-reported
+bugs using a pluggable AI coding CLI -- choose between
+[Cursor CLI](https://cursor.com/cli) (recommended),
+[OpenAI Codex CLI](https://developers.openai.com/codex/cli/reference), or
+[Claude Code](https://docs.anthropic.com/en/docs/claude-code).
 
-Monitors open pull requests for Cursor Bugbot review comments, parses bug reports, generates fixes via `claude -p`, and commits them directly to the PR head branch. A cost-effective alternative to Cursor's built-in Autofix.
+Monitors open pull requests for Cursor Bugbot review comments, parses bug reports, dispatches to the configured fixer to apply the fix, and commits the result directly to the PR head branch. A cost-effective alternative to Cursor's built-in Autofix.
 
 ## Features
 
 - **Cursor Bugbot monitoring**: Polls GitHub for `cursor[bot]` review comments using repo-level API for efficient scanning
 - **Resolved thread filtering**: Skips bugs whose review threads have been resolved (via GraphQL API)
 - **Automatic bug parsing**: Extracts title, severity, description, file path, and line numbers from Bugbot's structured comment format
-- **Claude Code fix generation**: Runs `claude -p` with Edit tools to fix detected bugs in cloned repositories
+- **Pluggable fix backend**: Switch between Cursor, Codex, and Claude CLIs via the `AUTOFIX_FIXER` environment variable
 - **Direct commit to PR**: Pushes fixes directly to the PR head branch (no separate fix branch or approval workflow)
 - **Duplicate prevention**: SQLite-based state tracking ensures each bug ID is processed only once
 - **Single-instance lock**: File-based lock prevents multiple daemon instances from running concurrently
@@ -20,7 +24,7 @@ Monitors open pull requests for Cursor Bugbot review comments, parses bug report
 ## Prerequisites
 
 - A [GitHub App](https://docs.github.com/en/apps/creating-github-apps) with required permissions, installed on target organizations/user accounts
-- **`claude` CLI**: Authenticated Claude Code (`claude --version`)
+- One of the supported fixer CLIs installed and authenticated (see [Backend Selection](#backend-selection))
 - **`git`**: For repository operations
 - **Node.js** >= 18.0.0 (for local installation) or **Docker** (for containerized deployment)
 
@@ -38,7 +42,51 @@ After creating the App:
 2. Generate and download a **private key** (`.pem` file)
 3. Install the App on the organizations/user accounts whose repositories you want to monitor
 
-### Claude Code Authentication
+## Backend Selection
+
+`AUTOFIX_FIXER` is required and chooses which CLI Fixooly uses to apply fixes. **Cursor is the recommended backend** for daemon use because Cursor Pro's Auto/Composer pool has no 5-hour rolling rate limit, unlike Codex on ChatGPT Plus/Pro.
+
+| Backend | Plan | Headless auth | Rate limits | Recommended |
+|---|---|---|---|---|
+| `cursor` | Cursor Pro ($20/mo) | `CURSOR_API_KEY` | Monthly Auto+Composer pool, no per-hour cap | **Yes** |
+| `codex`  | ChatGPT Plus ($20/mo) | `CODEX_API_KEY` or `~/.codex/auth.json` | 5-hour rolling + weekly cap | When you prefer GPT-5.3-Codex |
+| `claude` | Anthropic plan or pay-as-you-go | `CLAUDE_CODE_OAUTH_TOKEN` / `ANTHROPIC_API_KEY` | Per-plan limits | Legacy |
+
+### Cursor CLI (recommended)
+
+```bash
+# Install (macOS, Linux, WSL)
+curl https://cursor.com/install -fsS | bash
+
+# Verify
+agent --version
+
+# Authenticate for daemon use
+export CURSOR_API_KEY=...
+```
+
+Optional: override the model with `AUTOFIX_CURSOR_MODEL=auto` (cost-optimised router) or `AUTOFIX_CURSOR_MODEL=composer-2.5` (Cursor's own agentic coding model). Both draw from the Auto+Composer usage pool included in the Cursor Pro flat rate.
+
+### Codex CLI
+
+```bash
+# Install (see https://developers.openai.com/codex/cli/reference for full options)
+npm install -g @openai/codex
+
+# Verify
+codex --version
+
+# Authenticate (one of):
+#   a) API key
+export CODEX_API_KEY=...
+#   b) ChatGPT subscription (run on a machine with a browser, then copy)
+codex login --device-auth
+# copy ~/.codex/auth.json to the daemon host afterwards
+```
+
+Optional: override the model with `AUTOFIX_CODEX_MODEL=gpt-5.3-codex` (the coding-tuned default).
+
+### Claude Code CLI (legacy)
 
 #### Option 1: OAuth Token (`CLAUDE_CODE_OAUTH_TOKEN`) -- for Pro/Max/Team plan
 
@@ -86,9 +134,12 @@ git clone https://github.com/Senna46/fixooly.git
 cd fixooly
 
 cp .env.example .env
-# Edit .env with your GitHub App credentials and Claude auth
+# Edit .env with your GitHub App credentials, the AUTOFIX_FIXER backend,
+# and the corresponding API key (CURSOR_API_KEY / CODEX_API_KEY /
+# CLAUDE_CODE_OAUTH_TOKEN or ANTHROPIC_API_KEY).
 
-# Prevent Docker from creating ~/.claude.json as a directory
+# (Claude only) Prevent Docker from creating ~/.claude.json as a directory
+# when AUTOFIX_FIXER=claude.
 touch ~/.claude.json
 
 docker compose build
@@ -124,15 +175,25 @@ Monitored repositories are auto-discovered from the GitHub App installations.
 | `AUTOFIX_POLL_INTERVAL` | No | `120` | Polling interval in seconds |
 | `AUTOFIX_WORK_DIR` | No | `~/.fixooly/repos` | Directory for cloning repositories |
 | `AUTOFIX_DB_PATH` | No | `~/.fixooly/state.db` | SQLite database path |
-| `AUTOFIX_CLAUDE_MODEL` | No | CLI default | Claude model to use |
 | `AUTOFIX_LOG_LEVEL` | No | `info` | Log level (debug/info/warn/error) |
 
-### Claude Authentication
+### Fixer Backend
 
-| Variable | Required | Description |
+| Variable | Required | Default | Description |
+|---|---|---|---|
+| `AUTOFIX_FIXER` | **Yes** | _(none)_ | `claude` / `codex` / `cursor` (no default; must opt in explicitly) |
+| `AUTOFIX_CURSOR_MODEL` | No | CLI default | Model override when `AUTOFIX_FIXER=cursor` (e.g. `auto`, `composer-2.5`) |
+| `AUTOFIX_CODEX_MODEL` | No | CLI default | Model override when `AUTOFIX_FIXER=codex` (e.g. `gpt-5.3-codex`) |
+| `AUTOFIX_CLAUDE_MODEL` | No | CLI default | Model override when `AUTOFIX_FIXER=claude` |
+
+### Fixer Authentication
+
+| Variable | Applies to | Description |
 |---|---|---|
-| `CLAUDE_CODE_OAUTH_TOKEN` | macOS Docker only | Claude OAuth token (`claude setup-token`) |
-| `ANTHROPIC_API_KEY` | Alternative | Anthropic API key for pay-as-you-go billing |
+| `CURSOR_API_KEY` | `cursor` | Cursor CLI API key for headless / daemon use |
+| `CODEX_API_KEY` | `codex` | OpenAI Codex CLI API key (alternative: `~/.codex/auth.json`) |
+| `CLAUDE_CODE_OAUTH_TOKEN` | `claude` | Claude OAuth token (`claude setup-token`) |
+| `ANTHROPIC_API_KEY` | `claude` | Anthropic API key for pay-as-you-go billing |
 
 ## Architecture
 
@@ -148,8 +209,8 @@ flowchart TD
     HasBugs -->|No| Sleep[Sleep poll interval]
     HasBugs -->|Yes| FetchPR[Fetch PR details, skip closed PRs]
     FetchPR --> Clone[Clone/fetch repo, checkout PR head branch]
-    Clone --> Claude["Run claude -p with Edit tools"]
-    Claude --> Changes{Changes made?}
+    Clone --> Fixer["Dispatch to selected BugFixer (claude / codex / cursor)"]
+    Fixer --> Changes{Changes made?}
     Changes -->|No| Record[Record bugs as processed]
     Changes -->|Yes| Commit[git add + commit + push to PR head]
     Commit --> PostComment[Post fix summary comment on PR]
@@ -163,13 +224,20 @@ flowchart TD
 | Module | Responsibility |
 |---|---|
 | `main.ts` | `FixoolyDaemon` polling loop, graceful shutdown, single-instance lock |
-| `config.ts` | Loads and validates `AUTOFIX_*` environment variables |
+| `config.ts` | Loads and validates `AUTOFIX_*` environment variables (incl. `AUTOFIX_FIXER`) |
 | `bugbotMonitor.ts` | Efficient repo-level scanning, resolved thread filtering, bug discovery |
 | `bugParser.ts` | Parses `cursor[bot]` comment bodies into structured `BugbotBug` objects |
-| `fixGenerator.ts` | Clones repos, runs `claude -p`, commits and pushes fixes |
+| `fixGenerator.ts` | Clones repos, builds the prompt, delegates fix generation to the injected `BugFixer`, then commits and pushes |
+| `fixers/types.ts` | `BugFixer` interface and `FixerKind` definitions |
+| `fixers/factory.ts` | `createFixer(config)` -- selects the implementation matching `AUTOFIX_FIXER` |
+| `fixers/claudeFixer.ts` | Claude Code CLI (`claude -p`) backend with `--allowedTools` restrictions |
+| `fixers/codexFixer.ts` | OpenAI Codex CLI (`codex exec`) backend with `--sandbox workspace-write` |
+| `fixers/cursorFixer.ts` | Cursor CLI (`agent -p`) backend with `--force --trust` for headless use |
+| `fixers/spawnRunner.ts` | Shared child-process runner (timeout, stdin piping, bounded stdout) |
+| `fixers/outputParser.ts` | Extracts `COMMIT_MSG:` / `FIX_DETAIL:` markers from any backend's stdout (text / JSON / JSONL) |
 | `githubClient.ts` | Octokit wrapper: GitHub App auth, repo-level comments, GraphQL threads, PR details |
 | `state.ts` | SQLite tracking of processed bug IDs to prevent duplicates |
-| `types.ts` | Shared TypeScript interfaces |
+| `types.ts` | Shared TypeScript interfaces (incl. `Config` and `FixerKind`) |
 | `logger.ts` | Structured logging with configurable levels |
 
 ## Running as a Service
