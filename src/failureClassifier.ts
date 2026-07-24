@@ -39,6 +39,14 @@ const TRANSIENT_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
     reason: "Claude usage limit reached.",
   },
   {
+    // Bad push credentials break every repo at once, so this must not be
+    // treated as a per-bug fault: it would abandon unrelated bugs and post
+    // give-up comments everywhere while the token is being rotated.
+    pattern:
+      /invalid username or token|authentication failed for|could not read Username/i,
+    reason: "The git push token is invalid or expired (AUTOFIX_PUSH_TOKEN).",
+  },
+  {
     pattern:
       /oauth (?:access )?(?:token|session) (?:has )?expired|invalid authentication credentials|\b401\b/i,
     reason: "Claude authentication expired or was rejected.",

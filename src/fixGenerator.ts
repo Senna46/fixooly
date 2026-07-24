@@ -386,8 +386,13 @@ export class FixGenerator {
             stderr: stderr.substring(0, 1000) || "(empty)",
             stdoutTail: stdout.substring(Math.max(0, stdout.length - 2000)) || "(empty)",
           });
+          // The actionable cause (usage limit, expired auth) is printed by the
+          // CLI rather than raised as an exit reason, so carry it in the error
+          // message — callers classify failures from that message alone.
           reject(
-            new Error(`claude -p fix generation exited with code ${code}.`)
+            new Error(
+              `claude -p fix generation exited with code ${code}. ${extractFailureDetail(stdout, stderr)}`
+            )
           );
           return;
         }
@@ -948,6 +953,20 @@ function parseFixDetails(claudeOutput: string): Map<string, string> {
   }
 
   return details;
+}
+
+// ============================================================
+// Utility: pull the actionable tail out of a failed claude -p run
+// ============================================================
+
+const MAX_FAILURE_DETAIL_CHARS = 500;
+
+function extractFailureDetail(stdout: string, stderr: string): string {
+  const source = stderr.trim() || stdout.trim();
+  if (!source) return "(no output)";
+  return source.length > MAX_FAILURE_DETAIL_CHARS
+    ? source.slice(-MAX_FAILURE_DETAIL_CHARS)
+    : source;
 }
 
 // ============================================================

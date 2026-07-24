@@ -151,6 +151,8 @@ class FixoolyDaemon {
   private async pollCycle(): Promise<void> {
     logger.info("Starting polling cycle...");
 
+    this.state.expireStaleFailures();
+
     const reports = await this.monitor.discoverUnprocessedBugs();
 
     if (reports.length === 0) {
@@ -165,7 +167,14 @@ class FixoolyDaemon {
 
     for (const report of reports) {
       if (this.isShuttingDown) break;
-      await this.processReport(report);
+      const outcome = await this.processReport(report);
+      if (outcome === "abort-cycle") {
+        logger.warn(
+          "Environment-level failure detected. Skipping the rest of this cycle.",
+          { remainingPrs: reports.length - reports.indexOf(report) - 1 }
+        );
+        break;
+      }
     }
   }
 
@@ -173,7 +182,9 @@ class FixoolyDaemon {
   // Process a single PR bug report
   // ============================================================
 
-  private async processReport(report: PrBugReport): Promise<void> {
+  private async processReport(
+    report: PrBugReport
+  ): Promise<"ok" | "abort-cycle"> {
     const { pr, bugs } = report;
     const repoFullName = `${pr.owner}/${pr.repo}`;
 
@@ -234,8 +245,10 @@ class FixoolyDaemon {
       }
     } catch (error) {
       const raw = error instanceof Error ? error.message : String(error);
-      await this.handleFixFailure(report, sanitizeGitError(raw));
+      return this.handleFixFailure(report, sanitizeGitError(raw));
     }
+
+    return "ok";
   }
 
   // ============================================================
@@ -245,7 +258,7 @@ class FixoolyDaemon {
   private async handleFixFailure(
     report: PrBugReport,
     message: string
-  ): Promise<void> {
+  ): Promise<"ok" | "abort-cycle"> {
     const { pr, bugs } = report;
     const repoFullName = `${pr.owner}/${pr.repo}`;
     const records = bugs.map((b) => ({
@@ -263,7 +276,7 @@ class FixoolyDaemon {
         { error: message, reason, prNumber: pr.number, repo: repoFullName }
       );
       await this.postFailureComment(pr, bugs, reason, message);
-      return;
+      return "ok";
     }
 
     // Transient outages must not burn the retry budget of a fixable bug.
@@ -287,7 +300,10 @@ class FixoolyDaemon {
       );
     }
 
-    if (exhausted.length === 0) return;
+    // A transient failure is an environment problem (usage limit, bad push
+    // token) that will hit every remaining PR the same way. Stop the cycle
+    // instead of spending a full fix generation per PR to rediscover it.
+    if (exhausted.length === 0) return kind === "transient" ? "abort-cycle" : "ok";
 
     const exhaustedIds = new Set(exhausted.map((r) => r.bugId));
     this.state.recordProcessedBugs(
@@ -311,6 +327,8 @@ class FixoolyDaemon {
       `Fix generation failed ${MAX_FIX_ATTEMPTS} times.`,
       message
     );
+
+    return "ok";
   }
 
   // ============================================================

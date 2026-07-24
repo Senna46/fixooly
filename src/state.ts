@@ -30,6 +30,12 @@ export const MAX_FIX_ATTEMPTS = 3;
 // first entry and simply stop the every-cycle hammering.
 const RETRY_BACKOFF_MS = [5 * 60_000, 15 * 60_000, 30 * 60_000];
 
+// A live bug resolves within an hour (3 attempts, 30 min of backoff at most).
+// A FAILED row older than this is one whose comment discovery never returned
+// again — deleted, or aged out of the lookback window. Left alone it would
+// keep the repo on the widened scan window forever, so it is retired instead.
+const STALE_FAILURE_MS = 24 * 60 * 60 * 1000;
+
 export class StateStore {
   private db: Database.Database;
 
@@ -112,6 +118,28 @@ export class StateStore {
       RETRY_BACKOFF_MS.length - 1
     );
     return now - lastAttempt < RETRY_BACKOFF_MS[index];
+  }
+
+  // Retire FAILED rows that discovery has stopped surfacing, so they cannot
+  // hold a repo on the widened scan window indefinitely. Returns the number
+  // of rows retired.
+  expireStaleFailures(now: number = Date.now()): number {
+    const cutoff = new Date(now - STALE_FAILURE_MS).toISOString();
+    const result = this.db
+      .prepare(
+        `UPDATE processed_bugs SET fix_commit_sha = ?
+         WHERE fix_commit_sha = ? AND processed_at < ?`
+      )
+      .run(BUG_STATUS.FAILED_PERMANENT, BUG_STATUS.FAILED, cutoff);
+
+    if (result.changes > 0) {
+      logger.info(
+        `Retired ${result.changes} stale failed bug(s) that were never re-discovered.`,
+        { cutoff }
+      );
+    }
+
+    return result.changes;
   }
 
   hasRetryableBugsForRepo(repo: string): boolean {
