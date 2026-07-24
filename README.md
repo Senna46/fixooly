@@ -127,6 +127,18 @@ Monitored repositories are auto-discovered from the GitHub App installations.
 | `AUTOFIX_CLAUDE_MODEL` | No | CLI default | Claude model to use |
 | `AUTOFIX_LOG_LEVEL` | No | `info` | Log level (debug/info/warn/error) |
 
+### Retry policy
+
+When a fix attempt fails, the failure is classified before Fixooly decides whether to try again:
+
+| Class | Examples | Behavior |
+|---|---|---|
+| Permanent | Push rejected by branch protection, PAT missing the `workflow` scope, write permission denied | Given up on immediately — a retry would fail identically |
+| Transient | Claude usage limit, expired/invalid auth, network errors | Retried after a backoff, without consuming a retry attempt |
+| Other | Fix generation errored or timed out | Retried after a backoff, consuming one of 3 attempts |
+
+Retries back off (5 → 15 → 30 minutes) instead of running every cycle, so a failing bug cannot burn a full fix generation every couple of minutes. Once a bug is given up on, Fixooly posts a comment on the PR explaining why and never picks it up again.
+
 ### Claude Authentication
 
 | Variable | Required | Description |

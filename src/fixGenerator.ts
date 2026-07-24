@@ -954,7 +954,7 @@ function parseFixDetails(claudeOutput: string): Map<string, string> {
 // Utility: strip leaked tokens from git error messages
 // ============================================================
 
-function sanitizeGitError(message: string): string {
+export function sanitizeGitError(message: string): string {
   return message
     .replace(/x-access-token:[^\s@]+/g, "x-access-token:[REDACTED]")
     .replace(/http\.[^\s]*\.extraheader=Authorization: basic [A-Za-z0-9+/=]+/g, "http.extraheader=[REDACTED]")
