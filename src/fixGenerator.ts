@@ -49,6 +49,13 @@ const CLAUDE_TIMEOUT_MS = 10 * 60 * 1000;
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_STDOUT_SIZE = 100_000;
 
+// Push race: the head branch can move while claude -p runs (minutes).
+// Matches only git's non-fast-forward rejection; permission failures and
+// policy rejections ("remote rejected") must not trigger a rebase retry.
+const NON_FAST_FORWARD_PATTERN =
+  /\[rejected\][^\n]*\((?:fetch first|non-fast-forward)\)|failed to push some refs[\s\S]*fetch first/i;
+const MAX_PUSH_REBASE_RETRIES = 2;
+
 const execFileAsync = promisify(execFile);
 
 export class FixGenerator {
@@ -726,8 +733,13 @@ export class FixGenerator {
       "commit", "-m", commitMessage,
     ]);
 
-    const sha = (await this.execGit(repoDir, ["rev-parse", "HEAD"])).trim();
+    await this.pushWithRebaseRetry(repoDir, branchName);
 
+    // Read the sha only after pushing: a rebase retry rewrites the commit.
+    return (await this.execGit(repoDir, ["rev-parse", "HEAD"])).trim();
+  }
+
+  private async pushBranch(repoDir: string, branchName: string): Promise<void> {
     if (this.config.pushToken) {
       await this.execGitWithToken(repoDir, this.config.pushToken, [
         "push", "origin", branchName,
@@ -735,8 +747,58 @@ export class FixGenerator {
     } else {
       await this.execGit(repoDir, ["push", "origin", branchName]);
     }
+  }
 
-    return sha;
+  // Push, and when the branch moved while the fix was being generated
+  // (someone pushed during the claude -p run), rebase the fix commit onto
+  // the new tip and try again instead of discarding a finished generation.
+  // A rebase conflict aborts cleanly and rethrows the original push error
+  // so the normal retry policy takes over.
+  private async pushWithRebaseRetry(
+    repoDir: string,
+    branchName: string
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.pushBranch(repoDir, branchName);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          attempt >= MAX_PUSH_REBASE_RETRIES ||
+          !NON_FAST_FORWARD_PATTERN.test(message)
+        ) {
+          throw error;
+        }
+
+        logger.warn(
+          "Push rejected because the branch moved. Rebasing fix onto the new tip and retrying.",
+          { branchName, attempt: attempt + 1 }
+        );
+
+        await this.execGit(repoDir, ["fetch", "origin", branchName]);
+        try {
+          await this.execGit(repoDir, [
+            "-c", `user.name=${this.botName}`,
+            "-c", `user.email=${this.botEmail}`,
+            "rebase", `origin/${branchName}`,
+          ]);
+        } catch {
+          try {
+            await this.execGit(repoDir, ["rebase", "--abort"]);
+          } catch {
+            logger.warn("git rebase --abort failed; next run resets the clone.", {
+              branchName,
+            });
+          }
+          logger.warn(
+            "Fix conflicts with the new branch tip. Falling back to a fresh generation.",
+            { branchName }
+          );
+          throw error;
+        }
+      }
+    }
   }
 
   private buildGitAuthArgs(): string[] {

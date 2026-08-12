@@ -139,6 +139,8 @@ When a fix attempt fails, the failure is classified before Fixooly decides wheth
 
 Retries back off (5 → 15 → 30 minutes) instead of running every cycle, so a failing bug cannot burn a full fix generation every couple of minutes. Once a bug is given up on, Fixooly posts a comment on the PR explaining why and never picks it up again.
 
+If the PR head branch moves while a fix is being generated (someone pushes during the `claude -p` run), the resulting non-fast-forward rejection does not discard the finished fix: Fixooly rebases its commit onto the new tip and pushes again. Only a genuine conflict falls back to a fresh generation on the next retry.
+
 ### Claude Authentication
 
 | Variable | Required | Description |
