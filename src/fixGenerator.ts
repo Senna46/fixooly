@@ -11,7 +11,7 @@
 import { execFile, spawn } from "child_process";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
-import { mkdir } from "fs/promises";
+import { mkdir, rm } from "fs/promises";
 import { dirname, join, resolve as pathResolve } from "path";
 import { promisify } from "util";
 
@@ -206,6 +206,11 @@ export class FixGenerator {
     repoDir: string,
     pr: PullRequest
   ): Promise<void> {
+    // A previous run may have died mid-rebase (e.g. rebase --abort failed
+    // after a conflicted push retry). reset/clean do not clear rebase
+    // metadata, and checkout fails while a rebase is in progress.
+    await this.clearInProgressRebase(repoDir);
+
     // Discard any leftover changes from a previous run (e.g. crash after
     // claude -p edited files but before commit/push completed).
     await this.execGit(repoDir, ["reset", "--hard", "HEAD"]);
@@ -224,6 +229,39 @@ export class FixGenerator {
         pr.headRef,
         `origin/${pr.headRef}`,
       ]);
+    }
+  }
+
+  // Clear a rebase left in progress by a previous run. Prefers a regular
+  // rebase --abort; when that fails too (the state may be corrupt), removes
+  // the rebase metadata directories directly so the shared clone stays usable.
+  private async clearInProgressRebase(repoDir: string): Promise<void> {
+    const rebaseDirs: string[] = [];
+    for (const name of ["rebase-merge", "rebase-apply"]) {
+      const gitPath = (
+        await this.execGit(repoDir, ["rev-parse", "--git-path", name])
+      ).trim();
+      const absolutePath = pathResolve(repoDir, gitPath);
+      if (existsSync(absolutePath)) {
+        rebaseDirs.push(absolutePath);
+      }
+    }
+    if (rebaseDirs.length === 0) return;
+
+    logger.warn("Clearing rebase left in progress by a previous run.", {
+      repoDir,
+    });
+
+    try {
+      await this.execGit(repoDir, ["rebase", "--abort"]);
+    } catch {
+      for (const rebaseDir of rebaseDirs) {
+        await rm(rebaseDir, { recursive: true, force: true });
+      }
+      logger.warn(
+        "git rebase --abort failed; removed rebase metadata directly.",
+        { repoDir, rebaseDirs }
+      );
     }
   }
 
