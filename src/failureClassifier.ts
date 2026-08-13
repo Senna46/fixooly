@@ -35,7 +35,9 @@ const PERMANENT_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
 
 const TRANSIENT_PATTERNS: Array<{ pattern: RegExp; reason: string }> = [
   {
-    pattern: /hit your limit|usage limit|rate limit|\b429\b/i,
+    // The CLI phrases this several ways: "hit your limit",
+    // "hit your session limit", "hit your weekly limit", ...
+    pattern: /hit your (?:\w+ )?limit|usage limit|rate limit|\b429\b/i,
     reason: "Claude usage limit reached.",
   },
   {
