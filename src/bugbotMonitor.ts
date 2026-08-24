@@ -9,10 +9,16 @@
 import { isBugbotComment, parseBugbotComment } from "./bugParser.js";
 import type { GitHubClient } from "./githubClient.js";
 import { logger } from "./logger.js";
+import { BUG_STATUS } from "./state.js";
 import type { StateStore } from "./state.js";
 import type { Config, PrBugReport } from "./types.js";
 
 const DEFAULT_LOOKBACK_DAYS = 7;
+// Widened window used while a repo still has retryable bugs, so a bug whose
+// comment has aged out of the default window can still be re-found. Bounded
+// on purpose: dropping the filter entirely paginates every review comment in
+// the repo on every cycle.
+const RETRY_LOOKBACK_DAYS = 30;
 
 export class BugbotMonitor {
   private github: GitHubClient;
@@ -110,13 +116,20 @@ export class BugbotMonitor {
       return null;
     }
 
-    // First pass: filter out already-processed bugs (cheap local check)
+    // First pass: filter out already-processed and backed-off bugs
+    // (cheap local checks, no API calls)
     const candidateComments = [];
     for (const comment of bugbotComments) {
       const bug = parseBugbotComment(comment);
       if (!bug) continue;
       if (this.state.isBugProcessed(bug.bugId)) {
         logger.debug("Bug already processed, skipping.", { bugId: bug.bugId });
+        continue;
+      }
+      if (this.state.isInRetryBackoff(bug.bugId)) {
+        logger.debug("Bug is in retry backoff, skipping this cycle.", {
+          bugId: bug.bugId,
+        });
         continue;
       }
       candidateComments.push({ comment, bug });
@@ -137,7 +150,7 @@ export class BugbotMonitor {
           repo: `${owner}/${repo}`,
           prNumber,
         })),
-        "SKIPPED_PR_CLOSED"
+        BUG_STATUS.SKIPPED_PR_CLOSED
       );
       logger.debug(
         `PR #${prNumber} in ${owner}/${repo} is closed/inaccessible, skipping ${candidateComments.length} bug(s).`,
@@ -177,7 +190,7 @@ export class BugbotMonitor {
           repo: `${owner}/${repo}`,
           prNumber,
         })),
-        "SKIPPED_RESOLVED"
+        BUG_STATUS.SKIPPED_RESOLVED
       );
       logger.debug(
         `Marked ${resolvedBugs.length} resolved bug(s) as SKIPPED_RESOLVED.`,
@@ -228,12 +241,17 @@ export class BugbotMonitor {
   // Compute the "since" timestamp for the API query
   // ============================================================
 
-  private computeSinceForRepo(repo: string): string | undefined {
-    if (this.state.hasRetryableBugsForRepo(repo)) {
-      logger.debug("Skipping since filter to retry failed/skipped bugs.", { repo });
-      return undefined;
+  private computeSinceForRepo(repo: string): string {
+    const hasRetryable = this.state.hasRetryableBugsForRepo(repo);
+    if (hasRetryable) {
+      logger.debug("Widening since filter to retry failed bugs.", {
+        repo,
+        lookbackDays: RETRY_LOOKBACK_DAYS,
+      });
     }
-    const lookbackMs = DEFAULT_LOOKBACK_DAYS * 24 * 60 * 60 * 1000;
+
+    const days = hasRetryable ? RETRY_LOOKBACK_DAYS : DEFAULT_LOOKBACK_DAYS;
+    const lookbackMs = days * 24 * 60 * 60 * 1000;
     return new Date(Date.now() - lookbackMs).toISOString();
   }
 }

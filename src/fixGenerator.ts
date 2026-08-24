@@ -11,7 +11,7 @@
 import { execFile, spawn } from "child_process";
 import { existsSync } from "fs";
 import { readFile } from "fs/promises";
-import { mkdir } from "fs/promises";
+import { mkdir, rm } from "fs/promises";
 import { dirname, join, resolve as pathResolve } from "path";
 import { promisify } from "util";
 
@@ -48,6 +48,13 @@ const FIX_DETAIL_PREFIX = "FIX_DETAIL: ";
 const CLAUDE_TIMEOUT_MS = 10 * 60 * 1000;
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_STDOUT_SIZE = 100_000;
+
+// Push race: the head branch can move while claude -p runs (minutes).
+// Matches only git's non-fast-forward rejection; permission failures and
+// policy rejections ("remote rejected") must not trigger a rebase retry.
+const NON_FAST_FORWARD_PATTERN =
+  /\[rejected\][^\n]*\((?:fetch first|non-fast-forward)\)|failed to push some refs[\s\S]*fetch first/i;
+const MAX_PUSH_REBASE_RETRIES = 2;
 
 const execFileAsync = promisify(execFile);
 
@@ -199,6 +206,11 @@ export class FixGenerator {
     repoDir: string,
     pr: PullRequest
   ): Promise<void> {
+    // A previous run may have died mid-rebase (e.g. rebase --abort failed
+    // after a conflicted push retry). reset/clean do not clear rebase
+    // metadata, and checkout fails while a rebase is in progress.
+    await this.clearInProgressRebase(repoDir);
+
     // Discard any leftover changes from a previous run (e.g. crash after
     // claude -p edited files but before commit/push completed).
     await this.execGit(repoDir, ["reset", "--hard", "HEAD"]);
@@ -217,6 +229,39 @@ export class FixGenerator {
         pr.headRef,
         `origin/${pr.headRef}`,
       ]);
+    }
+  }
+
+  // Clear a rebase left in progress by a previous run. Prefers a regular
+  // rebase --abort; when that fails too (the state may be corrupt), removes
+  // the rebase metadata directories directly so the shared clone stays usable.
+  private async clearInProgressRebase(repoDir: string): Promise<void> {
+    const rebaseDirs: string[] = [];
+    for (const name of ["rebase-merge", "rebase-apply"]) {
+      const gitPath = (
+        await this.execGit(repoDir, ["rev-parse", "--git-path", name])
+      ).trim();
+      const absolutePath = pathResolve(repoDir, gitPath);
+      if (existsSync(absolutePath)) {
+        rebaseDirs.push(absolutePath);
+      }
+    }
+    if (rebaseDirs.length === 0) return;
+
+    logger.warn("Clearing rebase left in progress by a previous run.", {
+      repoDir,
+    });
+
+    try {
+      await this.execGit(repoDir, ["rebase", "--abort"]);
+    } catch {
+      for (const rebaseDir of rebaseDirs) {
+        await rm(rebaseDir, { recursive: true, force: true });
+      }
+      logger.warn(
+        "git rebase --abort failed; removed rebase metadata directly.",
+        { repoDir, rebaseDirs }
+      );
     }
   }
 
@@ -386,8 +431,13 @@ export class FixGenerator {
             stderr: stderr.substring(0, 1000) || "(empty)",
             stdoutTail: stdout.substring(Math.max(0, stdout.length - 2000)) || "(empty)",
           });
+          // The actionable cause (usage limit, expired auth) is printed by the
+          // CLI rather than raised as an exit reason, so carry it in the error
+          // message — callers classify failures from that message alone.
           reject(
-            new Error(`claude -p fix generation exited with code ${code}.`)
+            new Error(
+              `claude -p fix generation exited with code ${code}. ${extractFailureDetail(stdout, stderr)}`
+            )
           );
           return;
         }
@@ -721,8 +771,13 @@ export class FixGenerator {
       "commit", "-m", commitMessage,
     ]);
 
-    const sha = (await this.execGit(repoDir, ["rev-parse", "HEAD"])).trim();
+    await this.pushWithRebaseRetry(repoDir, branchName);
 
+    // Read the sha only after pushing: a rebase retry rewrites the commit.
+    return (await this.execGit(repoDir, ["rev-parse", "HEAD"])).trim();
+  }
+
+  private async pushBranch(repoDir: string, branchName: string): Promise<void> {
     if (this.config.pushToken) {
       await this.execGitWithToken(repoDir, this.config.pushToken, [
         "push", "origin", branchName,
@@ -730,8 +785,58 @@ export class FixGenerator {
     } else {
       await this.execGit(repoDir, ["push", "origin", branchName]);
     }
+  }
 
-    return sha;
+  // Push, and when the branch moved while the fix was being generated
+  // (someone pushed during the claude -p run), rebase the fix commit onto
+  // the new tip and try again instead of discarding a finished generation.
+  // A rebase conflict aborts cleanly and rethrows the original push error
+  // so the normal retry policy takes over.
+  private async pushWithRebaseRetry(
+    repoDir: string,
+    branchName: string
+  ): Promise<void> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        await this.pushBranch(repoDir, branchName);
+        return;
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        if (
+          attempt >= MAX_PUSH_REBASE_RETRIES ||
+          !NON_FAST_FORWARD_PATTERN.test(message)
+        ) {
+          throw error;
+        }
+
+        logger.warn(
+          "Push rejected because the branch moved. Rebasing fix onto the new tip and retrying.",
+          { branchName, attempt: attempt + 1 }
+        );
+
+        await this.execGit(repoDir, ["fetch", "origin", branchName]);
+        try {
+          await this.execGit(repoDir, [
+            "-c", `user.name=${this.botName}`,
+            "-c", `user.email=${this.botEmail}`,
+            "rebase", `origin/${branchName}`,
+          ]);
+        } catch {
+          try {
+            await this.execGit(repoDir, ["rebase", "--abort"]);
+          } catch {
+            logger.warn("git rebase --abort failed; next run resets the clone.", {
+              branchName,
+            });
+          }
+          logger.warn(
+            "Fix conflicts with the new branch tip. Falling back to a fresh generation.",
+            { branchName }
+          );
+          throw error;
+        }
+      }
+    }
   }
 
   private buildGitAuthArgs(): string[] {
@@ -951,10 +1056,24 @@ function parseFixDetails(claudeOutput: string): Map<string, string> {
 }
 
 // ============================================================
+// Utility: pull the actionable tail out of a failed claude -p run
+// ============================================================
+
+const MAX_FAILURE_DETAIL_CHARS = 500;
+
+function extractFailureDetail(stdout: string, stderr: string): string {
+  const source = stderr.trim() || stdout.trim();
+  if (!source) return "(no output)";
+  return source.length > MAX_FAILURE_DETAIL_CHARS
+    ? source.slice(-MAX_FAILURE_DETAIL_CHARS)
+    : source;
+}
+
+// ============================================================
 // Utility: strip leaked tokens from git error messages
 // ============================================================
 
-function sanitizeGitError(message: string): string {
+export function sanitizeGitError(message: string): string {
   return message
     .replace(/x-access-token:[^\s@]+/g, "x-access-token:[REDACTED]")
     .replace(/http\.[^\s]*\.extraheader=Authorization: basic [A-Za-z0-9+/=]+/g, "http.extraheader=[REDACTED]")
