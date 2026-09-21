@@ -207,6 +207,8 @@ Logs: `~/.fixooly/logs/stdout.log` and `~/.fixooly/logs/stderr.log`.
 ## Related Projects
 
 - [Claude Code BugHunter](https://github.com/Senna46/claude-code-bughunter) -- Self-hosted PR bug detection agent (detection + fix)
+- [bugbot-host](https://github.com/Senna46/bugbot-host) -- Host other people's PRs so Cursor Bugbot can review them
+- [refactory](https://github.com/Senna46/refactory) -- Weekly behavior-preserving cleanup PRs
 
 ## License
 
