@@ -16,10 +16,16 @@ export interface Config {
   workDir: string;
   dbPath: string;
   claudeModel: string | null;
+  claudeEffort: ClaudeEffort | null;
+  claudeTimeoutMs: number;
   logLevel: LogLevel;
 }
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
+
+// Effort levels accepted by `claude --effort`. `max` is the deepest level
+// and is session-scoped unless also passed as CLAUDE_CODE_EFFORT_LEVEL.
+export type ClaudeEffort = "low" | "medium" | "high" | "xhigh" | "max";
 
 // ============================================================
 // GitHub PR Data
