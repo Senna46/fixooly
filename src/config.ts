@@ -11,9 +11,17 @@ import { config as dotenvConfig } from "dotenv";
 import { homedir } from "os";
 import { join } from "path";
 
-import type { Config, LogLevel } from "./types.js";
+import type { ClaudeEffort, Config, LogLevel } from "./types.js";
 
 const VALID_LOG_LEVELS: LogLevel[] = ["debug", "info", "warn", "error"];
+const VALID_CLAUDE_EFFORTS: ClaudeEffort[] = [
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+];
+const DEFAULT_CLAUDE_TIMEOUT_SECONDS = 600;
 
 export function loadConfig(): Config {
   dotenvConfig();
@@ -46,6 +54,12 @@ export function loadConfig(): Config {
 
   const pushToken = process.env.AUTOFIX_PUSH_TOKEN?.trim() || null;
   const claudeModel = process.env.AUTOFIX_CLAUDE_MODEL?.trim() || null;
+  const claudeEffort = parseClaudeEffort(process.env.AUTOFIX_CLAUDE_EFFORT);
+  const claudeTimeoutMs =
+    parsePositiveInt(
+      process.env.AUTOFIX_CLAUDE_TIMEOUT_SECONDS,
+      DEFAULT_CLAUDE_TIMEOUT_SECONDS
+    ) * 1000;
   const logLevel = parseLogLevel(process.env.AUTOFIX_LOG_LEVEL);
 
   return {
@@ -56,6 +70,8 @@ export function loadConfig(): Config {
     workDir,
     dbPath,
     claudeModel,
+    claudeEffort,
+    claudeTimeoutMs,
     logLevel,
   };
 }
@@ -98,6 +114,19 @@ function parsePositiveInt(
     );
   }
   return parsed;
+}
+
+function parseClaudeEffort(value: string | undefined): ClaudeEffort | null {
+  if (!value || value.trim() === "") {
+    return null;
+  }
+  const effort = value.trim().toLowerCase();
+  if (!VALID_CLAUDE_EFFORTS.includes(effort as ClaudeEffort)) {
+    throw new Error(
+      `Configuration error in parseClaudeEffort: AUTOFIX_CLAUDE_EFFORT must be one of ${VALID_CLAUDE_EFFORTS.join(", ")}, got "${value}".`
+    );
+  }
+  return effort as ClaudeEffort;
 }
 
 function parseLogLevel(value: string | undefined): LogLevel {

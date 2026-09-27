@@ -45,7 +45,6 @@ const ALLOWED_TOOLS = [
 const COMMIT_MSG_PREFIX = "COMMIT_MSG: ";
 const FIX_DETAIL_PREFIX = "FIX_DETAIL: ";
 
-const CLAUDE_TIMEOUT_MS = 10 * 60 * 1000;
 const SIGKILL_GRACE_MS = 5_000;
 const MAX_STDOUT_SIZE = 100_000;
 
@@ -365,10 +364,24 @@ export class FixGenerator {
     if (this.config.claudeModel) {
       args.push("--model", this.config.claudeModel);
     }
+    if (this.config.claudeEffort) {
+      args.push("--effort", this.config.claudeEffort);
+    }
+
+    // User settings can pin a lower effort (for example xhigh). The env var
+    // outranks both settings and --effort, and it is the only way `max`
+    // persists for the process rather than being treated as session-only.
+    const claudeEnv = { ...process.env };
+    if (this.config.claudeEffort) {
+      claudeEnv.CLAUDE_CODE_EFFORT_LEVEL = this.config.claudeEffort;
+    }
 
     logger.info("Running claude -p for fix generation...", {
       bugCount,
       repoDir,
+      model: this.config.claudeModel ?? "(default)",
+      effort: this.config.claudeEffort ?? "(cli default)",
+      timeoutMs: this.config.claudeTimeoutMs,
     });
 
     return new Promise<string>((resolve, reject) => {
@@ -377,6 +390,7 @@ export class FixGenerator {
       const child = spawn("claude", args, {
         cwd: repoDir,
         stdio: ["pipe", "pipe", "pipe"],
+        env: claudeEnv,
       });
 
       let stdout = "";
@@ -385,7 +399,7 @@ export class FixGenerator {
       const killTimer = setTimeout(() => {
         if (settled) return;
         logger.warn("claude -p timed out, sending SIGTERM.", {
-          timeoutMs: CLAUDE_TIMEOUT_MS,
+          timeoutMs: this.config.claudeTimeoutMs,
         });
         child.kill("SIGTERM");
         setTimeout(() => {
@@ -393,7 +407,7 @@ export class FixGenerator {
           logger.warn("claude -p did not exit after SIGTERM, sending SIGKILL.");
           child.kill("SIGKILL");
         }, SIGKILL_GRACE_MS);
-      }, CLAUDE_TIMEOUT_MS);
+      }, this.config.claudeTimeoutMs);
 
       child.stdout.on("data", (data: Buffer) => {
         stdout += data.toString();
@@ -414,13 +428,13 @@ export class FixGenerator {
         if (signal === "SIGTERM" || signal === "SIGKILL") {
           logger.error("claude -p timed out.", {
             signal,
-            timeoutMs: CLAUDE_TIMEOUT_MS,
+            timeoutMs: this.config.claudeTimeoutMs,
             stderr: stderr.substring(0, 1000) || "(empty)",
             stdoutTail: stdout.substring(Math.max(0, stdout.length - 1000)) || "(empty)",
           });
           reject(
             new Error(
-              `claude -p fix generation timed out after ${CLAUDE_TIMEOUT_MS / 1000}s.`
+              `claude -p fix generation timed out after ${this.config.claudeTimeoutMs / 1000}s.`
             )
           );
           return;

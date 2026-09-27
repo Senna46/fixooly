@@ -124,7 +124,9 @@ Monitored repositories are auto-discovered from the GitHub App installations.
 | `AUTOFIX_POLL_INTERVAL` | No | `120` | Polling interval in seconds |
 | `AUTOFIX_WORK_DIR` | No | `~/.fixooly/repos` | Directory for cloning repositories |
 | `AUTOFIX_DB_PATH` | No | `~/.fixooly/state.db` | SQLite database path |
-| `AUTOFIX_CLAUDE_MODEL` | No | CLI default | Claude model to use |
+| `AUTOFIX_CLAUDE_MODEL` | No | CLI default | Claude model alias or id. `opus` tracks the latest Opus release |
+| `AUTOFIX_CLAUDE_EFFORT` | No | CLI default | Effort level: `low`, `medium`, `high`, `xhigh`, or `max` |
+| `AUTOFIX_CLAUDE_TIMEOUT_SECONDS` | No | `600` | Timeout for one `claude -p` fix run |
 | `AUTOFIX_LOG_LEVEL` | No | `info` | Log level (debug/info/warn/error) |
 
 ### Retry policy

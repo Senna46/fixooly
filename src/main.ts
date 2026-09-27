@@ -49,6 +49,8 @@ class FixoolyDaemon {
       appId: this.config.appId,
       pollInterval: this.config.pollInterval,
       claudeModel: this.config.claudeModel ?? "(default)",
+      claudeEffort: this.config.claudeEffort ?? "(cli default)",
+      claudeTimeoutMs: this.config.claudeTimeoutMs,
     });
 
     await this.verifyPrerequisites();
